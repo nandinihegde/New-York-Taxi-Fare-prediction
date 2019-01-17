@@ -1,0 +1,456 @@
+---
+title: "New York City Taxi Fare Prediction"
+author: "Nandini Hegde"
+date: "September 25, 2018"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## loading the libraries
+
+```{r }
+
+library(readr)
+library(magrittr)
+library(dplyr)
+library(ggplot2)
+#install.packages("tigris")
+library(tigris)
+#library(leaflet)
+library(sp)
+library(ggmap)
+#install.packages("OneR")
+library(OneR)
+#install.packages("dismo")
+library(dismo)
+library(lubridate)
+library("ggpubr")
+library(Metrics)
+
+```
+
+## reading the data
+
+```{r }
+
+#readin training and testing dataset
+train<- read_csv("./input/train.csv", col_names = TRUE, n_max = 5000000, guess_max = 1000)
+test<- read_csv("./input/test.csv", col_names = TRUE)
+
+#remove NA
+train.clean<- na.omit(train)
+#removing keys column as its not useful
+train.clean<- train.clean[,-1]
+
+
+head(train.clean, 10)
+str(train.clean)
+
+```
+
+## data cleaning and exploration
+
+```{r }
+#convert to datetime
+train.clean$pickup_datetime<- as.POSIXct(train.clean$pickup_datetime,format="%Y-%m-%d %H:%M:%S",tz=Sys.timezone())
+test$pickup_datetime<- as.POSIXct(test$pickup_datetime,format="%Y-%m-%d %H:%M:%S",tz=Sys.timezone())
+
+summary(train.clean)
+
+
+```
+
+## data cleaning and exploration
+
+```{r }
+
+#Examine the variables for outliers
+
+hist(train.clean$fare_amount, col="skyblue", breaks = 100)
+ 
+hist(train.clean$passenger_count, col="skyblue", breaks=seq(0,10,by=1), labe) 
+
+plot(train.clean$pickup_latitude, train.clean$pickup_longitude)      
+
+#removing outliers
+train.clean<- train.clean %>% 
+                filter(fare_amount>=0, fare_amount<=100) %>%
+                filter(passenger_count>0, passenger_count<=6) %>%
+                filter(pickup_latitude>=40, pickup_latitude<=45, pickup_longitude>=-75, pickup_longitude<=-70) %>%
+                filter(dropoff_latitude>=40, dropoff_latitude<=42, dropoff_longitude>=-75, dropoff_longitude<=-70)
+
+
+
+```
+
+## NYC map plot
+
+```{r }
+nyc_map <- get_map(location = c(lon = -74.00, lat = 40.71), maptype = "terrain", zoom = 11)
+
+# plotting the map with some points on it
+
+set.seed(123)
+subset_data<-sample(1:nrow(train.clean),10000)
+
+train.clean$fare_bin<-cut(train.clean$fare_amount, breaks=c(0,2.5, 6,11, 13,100, right=FALSE))
+
+map_train<-train.clean[subset_data,]
+
+#Pickup locations plot
+gmap(nyc_map) +
+  geom_point(data = map_train, aes(x = pickup_longitude, y = pickup_latitude,color= fare_bin, alpha = 0.1), size = 1, shape = 21) +
+  guides(fill=FALSE, alpha=FALSE, size=FALSE)+
+  title("Pickup locations")
+
+
+```
+
+
+
+```{r }
+
+
+ggmap(nyc_map) +
+  geom_point(data = map_train, aes(x = dropoff_longitude, y = dropoff_latitude,color= fare_bin, alpha = 0.1), size = 1, shape = 21) +
+  guides(fill=FALSE, alpha=FALSE, size=FALSE)
+  title("Dropoff locations")
+
+
+```
+
+## Feature engineering
+
+```{r }
+
+# Absolute difference in latitude and longitude
+train.clean$abs_lat_diff<- abs(train.clean$pickup_latitude-train.clean$dropoff_latitude)
+train.clean$abs_lon_diff<- abs(train.clean$pickup_longitude-train.clean$dropoff_longitude)
+
+map_train<-train.clean[subset_data,]
+
+qplot(abs_lat_diff,abs_lon_diff, data = map_train, colour = map_train$fare_bin)
+```
+
+
+
+```{r }
+#Manhattan distance
+minkowski_distance<- function (x1, x2, y1, y2, p){
+  return ((abs(x2 - x1) ** p) + (abs(y2 - y1)) ** p) ** (1 / p)
+}
+
+train.clean$manhattandist <- minkowski_distance(train.clean$pickup_longitude, train.clean$dropoff_longitude, train.clean$pickup_latitude, train.clean$dropoff_latitude,1)
+
+map_train<-train.clean[subset_data,]
+
+ggplot() + 
+  geom_density(data=map_train, aes(x=manhattandist, group=fare_bin, fill=fare_bin),alpha=0.5, adjust=2) + 
+  xlab("manhatten dist") +
+  ylab("Density")
+```
+
+
+
+```{r }
+#Euclidean distance
+train.clean$euclideandist <- minkowski_distance(train.clean$pickup_longitude, train.clean$dropoff_longitude, train.clean$pickup_latitude, train.clean$dropoff_latitude,2)
+
+map_train<-train.clean[subset_data,]
+
+ggplot() + 
+  geom_density(data=map_train, aes(x=euclideandist, group=fare_bin, fill=fare_bin),alpha=0.5, adjust=2) + 
+  xlab("euclidean dist") +
+  ylab("Density")
+
+
+
+```
+
+##
+
+```{r }
+
+train.clean %>% group_by(fare_bin) %>% mutate(mean= mean(manhattandist), count= n()) %>% select(fare_bin, mean, count)
+
+train.clean %>% group_by(fare_bin) %>% mutate(mean= mean(euclideandist), count= n()) %>% select(fare_bin, mean, count)
+
+
+```
+
+
+
+```{r }
+#distribution by passenger count
+ggplot(data=map_train) + 
+  geom_density( aes(x=fare_amount, group=passenger_count, fill=passenger_count),alpha=0.5, adjust=2) + 
+  xlab("fare amount") +
+  ylab("Density")
+
+
+```
+
+
+
+```{r }
+
+train.clean %>% group_by(as.factor(passenger_count)) %>% summarise(mean= mean(euclideandist), count= n())
+
+
+
+```
+
+
+
+```{r }
+t.str <- strptime(train.clean$pickup_datetime, "%Y-%m-%d %H:%M:%S")
+t.lub <- ymd_hms(t.str)
+train.clean$year<-year(t.lub)
+train.clean$hour<-hour(t.lub)
+
+
+map_train<-train.clean[subset_data,]
+
+ggplot() + 
+  geom_density(data=map_train, aes(x=year, group=fare_bin, fill=fare_bin),alpha=0.5, adjust=2) + 
+  xlab("year") +
+  ylab("Density")
+
+ggplot() + 
+  geom_density(data=map_train, aes(x=hour, group=fare_bin, fill=fare_bin),alpha=0.5, adjust=2) + 
+  xlab("hour") +
+  ylab("Density")
+
+```
+
+
+```{r }
+#Haversine distance
+
+# Radius of the earth in kilometers
+R = 6378
+
+degrees.to.radians<-function(degrees=0,minutes=0)
+{
+if(!is.numeric(minutes)) stop("Please enter a numeric value for minutes!\n")
+if(!is.numeric(degrees)) stop("Please enter a numeric value for degrees!\n")
+decimal<-minutes/60
+c.num<-degrees+decimal
+radians<-c.num*pi/180
+ return (radians)
+}
+trans.arcsine <- function(x){
+  asin(sign(x) * sqrt(abs(x)))
+}
+
+
+haversine_np<- function(lon1, lat1, lon2, lat2){
+    # 
+    # Calculate the great circle distance between two points
+    # on the earth (specified in decimal degrees)
+    # 
+    # All args must be of equal length.    
+    # 
+    # source: https://stackoverflow.com/a/29546836
+
+    
+    # Convert latitude and longitude to radians
+    lon1<- degrees.to.radians(lon1)
+    lat1<- degrees.to.radians(lat1)
+    lon2<- degrees.to.radians(lon2)
+    lat2<- degrees.to.radians(lat2)
+  
+    # Find the differences
+    dlon = lon2 - lon1
+    dlat = lat2 - lat1
+
+    # Apply the formula 
+    a = sin(dlat/2.0)**2 + cos(lat1) * cos(lat2) * sin(dlon/2.0)**2
+    # Calculate the angle (in radians)
+    c = 2 * trans.arcsine(sqrt(a))
+    # Convert to kilometers
+    km = R * c
+    
+    return (km)
+    
+}
+
+train.clean$haversine<-haversine_np(train.clean$pickup_longitude, train.clean$pickup_latitude, train.clean$dropoff_longitude, train.clean$dropoff_latitude) 
+
+map_train<-train.clean[subset_data,]
+
+ggplot() + 
+  geom_density(data=map_train, aes(x=haversine, group=fare_bin, fill=fare_bin),alpha=0.5, adjust=2) + 
+  xlab("haversine") +
+  ylab("Density")
+
+```
+
+
+```{r }
+train.clean %>% group_by(fare_bin) %>% summarise(mean= mean(haversine), count= n())
+
+
+```
+
+## create the features in the test dataset
+
+```{r }
+test$abs_lat_diff<- abs(test$pickup_latitude-test$dropoff_latitude)
+test$abs_lon_diff<- abs(test$pickup_longitude-test$dropoff_longitude)
+test$manhattandist <- minkowski_distance(test$pickup_longitude, test$dropoff_longitude, test$pickup_latitude, test$dropoff_latitude,1)
+test$euclideandist <- minkowski_distance(test$pickup_longitude, test$dropoff_longitude, test$pickup_latitude, test$dropoff_latitude,2)
+test$haversine<-haversine_np(test$pickup_longitude, test$pickup_latitude, test$dropoff_longitude, test$dropoff_latitude) 
+
+
+t.str <- strptime(test$pickup_datetime, "%Y-%m-%d %H:%M:%S")
+t.lub <- ymd_hms(t.str)
+test$year<-year(t.lub)
+test$hour<-hour(t.lub)
+
+```
+
+
+## plottting the correlation between rates and distance
+
+```{r }
+
+cor.matric<- cor(train.clean[,c(-2,-11)])
+cor.matric
+
+```
+
+## Machine Learning
+
+
+```{r }
+#split training dataset further into training and test
+
+## 75% of the sample size
+smp_size <- floor(0.75 * nrow(train.clean))
+
+## set the seed to make your partition reproducible
+set.seed(123)
+train_ind <- sample(seq_len(nrow(train.clean)), size = smp_size)
+
+train.v <- train.clean[train_ind, ]
+test.v <- train.clean[-train_ind, ]
+
+
+```
+
+## First model -Linear Regression
+
+```{r }
+#train with simple features
+linearMod <- lm(fare_amount ~ abs_lat_diff+abs_lon_diff+passenger_count, data=train.v)  # build linear regression model on full data
+linearMod
+
+```
+
+## Scoping the model using RMSE and Mean Absolute percentage error (MAPE)
+
+```{r }
+# Hack function to return and unpack multiple variables 
+':=' <- function(lhs, rhs) {
+  frame <- parent.frame()
+  lhs <- as.list(substitute(lhs))
+  if (length(lhs) > 1)
+    lhs <- lhs[-1]
+  if (length(lhs) == 1) {
+    do.call(`=`, list(lhs[[1]], rhs), envir=frame)
+    return(invisible(NULL)) 
+  }
+  if (is.function(rhs) || is(rhs, 'formula'))
+    rhs <- list(rhs)
+  if (length(lhs) > length(rhs))
+    rhs <- c(rhs, rep(list(NULL), length(lhs) - length(rhs)))
+  for (i in 1:length(lhs))
+    do.call(`=`, list(lhs[[i]], rhs[[i]]), envir=frame)
+  return(invisible(NULL)) 
+}
+
+metrics<- function(train_pred, valid_pred, y_train, y_valid)
+  {
+  #  """Calculate metrics:
+   #    Root mean squared error and mean absolute percentage error"""
+    
+    # Root mean squared error
+    train_rmse = rmse(y_train, train_pred)
+    valid_rmse = rmse(y_valid, valid_pred)
+    
+    # Calculate absolute percentage error
+    train_ape = abs((y_train - train_pred) / y_train)
+    valid_ape = abs((y_valid - valid_pred) / y_valid)
+    
+    # Account for y values of 0
+    train_ape[train_ape == Inf] = 0
+    train_ape[train_ape == -Inf] = 0
+    valid_ape[valid_ape == Inf] = 0
+    valid_ape[valid_ape == -Inf] = 0
+    
+    train_mape = 100 * mean(train_ape)
+    valid_mape = 100 * mean(valid_ape)
+    
+    return (list(train_rmse, valid_rmse, train_mape, valid_mape))
+}
+
+evaluate<- function(model, features, X_train, X_valid, y_train, y_valid){
+  #  """Mean absolute percentage error"""
+    
+    # Make predictions
+    train_pred = predict(model, X_train[,features])
+    valid_pred = predict(model, X_valid[,features])
+    
+    # Get metrics
+    c(train_rmse, valid_rmse, train_mape, valid_mape) := metrics(train_pred, valid_pred,y_train, y_valid)
+    
+    print(cat(paste('Training:   rmse = ',round(train_rmse, 2),'mape = ',round(train_mape, 2), sep=":\t")))
+    print(cat(paste('Validation:   rmse = ',round(valid_rmse, 2),' mape = ',round(valid_mape, 2), sep=":\t")))
+}
+
+```
+
+## evaluating the basic linear model
+
+```{r }
+evaluate(linearMod, c('abs_lat_diff', 'abs_lon_diff', 'passenger_count'),train.v[,-1], test.v[,-1], train.v$fare_amount, test.v$fare_amount)
+
+```
+
+## comparing it to a Naive Baseline of mean target variable
+
+```{r }
+train_mean = mean(train.v$fare_amount)
+
+# Create list of the same prediction for every observation
+train_preds = rep(train_mean, each= nrow(train.v$fare_amount))
+valid_preds = rep(train_mean, each= nrow(test.v$fare_amount))
+
+c(tr, vr, tm, vm) := metrics(train_preds, valid_preds, train.v$fare_amount, test.v$fare_amount)
+
+print(cat(paste('Baseline Training:   rmse = ',round(tr, 2),'mape = ',round(tm, 2), sep=":\t")))
+print(cat(paste('Baseline Validation:   rmse = ',round(vr, 2),' mape = ',round(vm, 2), sep=":\t")))
+
+```
+We see that our linear regression performs way better than the Naive baseline
+
+## Submission for Kaggle 
+
+```{r }
+
+preds<- predict(linearMod, test[,c('abs_lat_diff', 'abs_lon_diff', 'passenger_count')])
+
+subs<-cbind(as.character(test$key),as.numeric(preds))
+
+subs<-as.data.frame(subs)
+names(subs)<-c("test_id","fare_amount")
+write.csv(subs,file = "kagglesubmission.csv")
+
+```
+
+
+
